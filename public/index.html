@@ -157,7 +157,7 @@
       get: async (syncId) => {
         try {
           console.log('CloudSync.get: Fetching', syncId);
-          const res = await fetch('/api/sync?id=' + syncId);
+          const res = await fetch('/api/sync?id=' + syncId.toUpperCase());
           
           if (!res.ok) {
             console.error('CloudSync.get error:', res.status);
@@ -174,8 +174,8 @@
       
       update: async (syncId, newData) => {
         try {
-          const res = await fetch('/api/sync?id=' + syncId, {
-            method: 'POST',
+          const res = await fetch('/api/sync?id=' + syncId.toUpperCase(), {
+            method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(newData)
           });
@@ -600,6 +600,15 @@ Respond with ONLY valid JSON:
       useEffect(() => { S.set('validationResults', validationResults) }, [validationResults]);
       useEffect(() => { S.set('giftValidationResults', giftValidationResults) }, [giftValidationResults]);
 
+      // Sync from cloud on page load if connected
+      const initialSyncDone = useRef(false);
+      useEffect(() => {
+        if (syncBinId && !initialSyncDone.current) {
+          initialSyncDone.current = true;
+          syncFromCloud();
+        }
+      }, [syncBinId]);
+
       // Auto-sync on data change (debounced)
       const syncTimeout = useRef(null);
       useEffect(() => {
@@ -649,15 +658,21 @@ Respond with ONLY valid JSON:
       const createSync = async () => {
         setSyncing(true);
         try {
-          const code = generateSyncCode();
-          const binId = await CloudSync.create({ gifts, expenses, transfers, syncCode: code });
-          if (binId) {
-            setSyncCode(code);
+          const binId = await CloudSync.create({ gifts, expenses, transfers });
+          if (binId && typeof binId === 'string') {
+            // The server returns a 5-letter code - use it as both the display code AND the API ID
+            setSyncCode(binId);
             setSyncBinId(binId);
             setLastSync(Date.now());
             setSyncing(false);
-            return code;
+            return binId;
           }
+        } catch (e) {
+          console.error('createSync error:', e);
+        }
+        setSyncing(false);
+        return null;
+      };
         } catch (e) {
           console.error('createSync error:', e);
           throw e;
@@ -1946,26 +1961,43 @@ Based on the vendor name and items, respond with ONLY valid JSON:
         };
 
         const copyFamilyCode = () => {
-          const shareData = JSON.stringify({ syncCode, syncBinId });
-          navigator.clipboard.writeText(btoa(shareData));
+          // Just copy the 5-letter code
+          navigator.clipboard.writeText(syncCode);
           setCopied(true);
           setTimeout(() => setCopied(false), 2000);
         };
 
-        const handleJoinSync = () => {
-          try {
-            const data = JSON.parse(atob(joinCode.trim()));
-            if (data.syncCode && data.syncBinId) {
-              setSyncCode(data.syncCode);
-              setSyncBinId(data.syncBinId);
-              syncFromCloud();
-              alert('✅ Connected! Syncing data...');
-              setJoinCode('');
-            } else {
-              alert('Invalid family code');
-            }
-          } catch {
-            alert('Invalid code. Make sure you copied the whole thing.');
+        const handleJoinSync = async () => {
+          const code = joinCode.trim().toUpperCase();
+          if (code.length < 4 || code.length > 6) {
+            alert('Please enter the 5-letter family code');
+            return;
+          }
+          
+          // Try to fetch data with this code
+          setSyncing(true);
+          const data = await CloudSync.get(code);
+          setSyncing(false);
+          
+          if (data) {
+            setSyncCode(code);
+            setSyncBinId(code);
+            
+            // Merge the data
+            const mergeArrays = (local, cloud) => {
+              const map = new Map();
+              [...local, ...(cloud || [])].forEach(item => map.set(item.id, item));
+              return Array.from(map.values());
+            };
+            setGifts(mergeArrays(gifts, data.gifts || []));
+            setExpenses(mergeArrays(expenses, data.expenses || []));
+            setTransfers(mergeArrays(transfers, data.transfers || []));
+            setLastSync(Date.now());
+            
+            alert('✅ Connected! Data synced.');
+            setJoinCode('');
+          } else {
+            alert('Code not found. Check the code and try again.');
           }
         };
 
@@ -2040,7 +2072,11 @@ Based on the vendor name and items, respond with ONLY valid JSON:
                   <span className="text-2xl">{syncCode ? '☁️' : '📴'}</span>
                   <div className="flex-1">
                     <p className="font-medium">{syncCode ? 'Family Sync Active' : 'Not Connected'}</p>
-                    <p className="text-slate-500 text-sm">{syncCode ? `Code: ${syncCode}` : 'Create or join below'}</p>
+                    {syncCode ? (
+                      <p className="text-green-400 text-xl font-bold tracking-widest">{syncCode}</p>
+                    ) : (
+                      <p className="text-slate-500 text-sm">Create or join below</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2076,20 +2112,21 @@ Based on the vendor name and items, respond with ONLY valid JSON:
                     </button>
                     
                     <div className="border-t border-slate-800 pt-3 mt-3">
-                      <p className="text-slate-400 text-xs mb-2">Or join existing:</p>
+                      <p className="text-slate-400 text-xs mb-2">Or join existing family:</p>
                       <input 
                         type="text" 
                         value={joinCode} 
-                        onChange={(e) => setJoinCode(e.target.value)} 
-                        placeholder="Paste family code" 
-                        className="w-full bg-slate-800 rounded-xl px-4 py-3 text-white mb-2 text-sm" 
+                        onChange={(e) => setJoinCode(e.target.value.toUpperCase().slice(0, 5))} 
+                        placeholder="Enter 5-letter code" 
+                        className="w-full bg-slate-800 rounded-xl px-4 py-3 text-white mb-2 text-sm text-center tracking-widest font-bold uppercase"
+                        maxLength={5}
                       />
                       <button 
                         onClick={handleJoinSync} 
-                        disabled={!joinCode.trim()} 
+                        disabled={!joinCode.trim() || syncing} 
                         className="w-full py-2 bg-slate-700 rounded-xl font-medium disabled:opacity-50"
                       >
-                        Join
+                        {syncing ? '🔄 Connecting...' : 'Join Family'}
                       </button>
                     </div>
                   </div>
