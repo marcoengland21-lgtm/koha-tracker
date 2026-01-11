@@ -26,8 +26,12 @@ export default async (req, context) => {
     // CREATE - POST without ID
     if (req.method === "POST" && !syncId) {
       const data = await req.json();
-      // Generate a 6-character sync code
-      const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
+      // Generate a 5-letter sync code (uppercase)
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let newId = '';
+      for (let i = 0; i < 5; i++) {
+        newId += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
       
       await store.setJSON(newId, {
         ...data,
@@ -43,7 +47,7 @@ export default async (req, context) => {
 
     // GET - retrieve data
     if (req.method === "GET" && syncId) {
-      const data = await store.get(syncId, { type: "json" });
+      const data = await store.get(syncId.toUpperCase(), { type: "json" });
       
       if (!data) {
         return new Response(JSON.stringify({ error: "not_found" }), {
@@ -58,11 +62,12 @@ export default async (req, context) => {
       });
     }
 
-    // UPDATE - POST with ID (merge data)
-    if (req.method === "POST" && syncId) {
+    // UPDATE - PUT with ID (replace data)
+    if (req.method === "PUT" && syncId) {
       const newData = await req.json();
-      const existing = await store.get(syncId, { type: "json" });
-
+      const id = syncId.toUpperCase();
+      
+      const existing = await store.get(id, { type: "json" });
       if (!existing) {
         return new Response(JSON.stringify({ error: "not_found" }), {
           status: 404,
@@ -86,7 +91,7 @@ export default async (req, context) => {
         updatedAt: Date.now(),
       };
 
-      await store.setJSON(syncId, merged);
+      await store.setJSON(id, merged);
 
       return new Response(JSON.stringify({ success: true, data: merged }), {
         status: 200,
