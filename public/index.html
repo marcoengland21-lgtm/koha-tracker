@@ -631,14 +631,21 @@ Respond with ONLY valid JSON:
       // Sync functions
       const syncToCloud = async () => {
         if (!syncBinId || syncing) return;
+        console.log('Syncing to cloud...');
         setSyncing(true);
-        const success = await CloudSync.update(syncBinId, { gifts, expenses, transfers, syncCode });
-        if (success) setLastSync(Date.now());
+        const success = await CloudSync.update(syncBinId, { gifts, expenses, transfers });
+        if (success) {
+          setLastSync(Date.now());
+          console.log('Sync to cloud complete');
+        } else {
+          console.error('Sync to cloud failed');
+        }
         setSyncing(false);
       };
 
       const syncFromCloud = async () => {
         if (!syncBinId || syncing) return;
+        console.log('Syncing from cloud...');
         setSyncing(true);
         const data = await CloudSync.get(syncBinId);
         if (data) {
@@ -651,6 +658,9 @@ Respond with ONLY valid JSON:
           setExpenses(mergeArrays(expenses, data.expenses || []));
           setTransfers(mergeArrays(transfers, data.transfers || []));
           setLastSync(Date.now());
+          console.log('Sync from cloud complete');
+        } else {
+          console.error('Sync from cloud failed or no data');
         }
         setSyncing(false);
       };
@@ -669,13 +679,6 @@ Respond with ONLY valid JSON:
           }
         } catch (e) {
           console.error('createSync error:', e);
-        }
-        setSyncing(false);
-        return null;
-      };
-        } catch (e) {
-          console.error('createSync error:', e);
-          throw e;
         }
         setSyncing(false);
         return null;
@@ -1143,8 +1146,8 @@ Based on the vendor name and items, respond with ONLY valid JSON:
                   <h1 className="text-2xl font-bold">Meaalofa • Koha Tracker</h1>
                 </div>
                 <button onClick={() => setScreen('sync')} className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 rounded-lg text-sm">
-                  {syncing ? <span className="spin">🔄</span> : syncCode ? <span className="text-green-400">☁️</span> : <span className="text-slate-500">☁️</span>}
-                  <span className="text-slate-400">{syncCode || 'Sync'}</span>
+                  {syncing ? <span className="spin">🔄</span> : syncBinId ? <span className="text-green-400">☁️</span> : <span className="text-slate-500">☁️</span>}
+                  <span className="text-slate-400">{syncBinId || 'Sync'}</span>
                 </button>
               </div>
 
@@ -1926,30 +1929,26 @@ Based on the vendor name and items, respond with ONLY valid JSON:
           setCreating(true);
           
           try {
-            log('Step 2: Generating sync code...');
-            const code = generateSyncCode();
-            log('Step 3: Code generated: ' + code);
-            
-            log('Step 4: Calling CloudSync.create...');
-            const result = await CloudSync.create({ gifts, expenses, transfers, syncCode: code });
-            log('Step 5: CloudSync.create returned: ' + JSON.stringify(result));
+            log('Step 2: Calling CloudSync.create...');
+            const result = await CloudSync.create({ gifts, expenses, transfers });
+            log('Step 3: CloudSync.create returned: ' + JSON.stringify(result));
             
             if (result && typeof result === 'string') {
-              // Success - result is the bin ID
-              setSyncCode(code);
+              // Success - result is the 5-letter code from the server
+              // Use it for BOTH syncCode and syncBinId
+              setSyncCode(result);
               setSyncBinId(result);
               setLastSync(Date.now());
               setStatus('✅ Created!');
-              log('Step 6: SUCCESS! Family code: ' + code + ', BinID: ' + result);
+              log('Step 4: SUCCESS! Code: ' + result);
             } else if (result && result.error) {
-              // Got an error object back
               setStatus('');
               setError('API Error: ' + result.error);
-              log('Step 6: API ERROR: ' + JSON.stringify(result));
+              log('Step 4: API ERROR: ' + JSON.stringify(result));
             } else {
               setStatus('');
               setError('Cloud sync failed - unknown error');
-              log('Step 6: FAILED - unexpected result: ' + JSON.stringify(result));
+              log('Step 4: FAILED - unexpected result: ' + JSON.stringify(result));
             }
           } catch (e) {
             log('ERROR: ' + (e.message || String(e)));
@@ -1962,7 +1961,7 @@ Based on the vendor name and items, respond with ONLY valid JSON:
 
         const copyFamilyCode = () => {
           // Just copy the 5-letter code
-          navigator.clipboard.writeText(syncCode);
+          navigator.clipboard.writeText(syncBinId);
           setCopied(true);
           setTimeout(() => setCopied(false), 2000);
         };
@@ -2067,13 +2066,13 @@ Based on the vendor name and items, respond with ONLY valid JSON:
               )}
 
               {/* Current Status */}
-              <div className={`rounded-xl p-4 mb-6 ${syncCode ? 'bg-green-900/30 border border-green-700/50' : 'bg-slate-900'}`}>
+              <div className={`rounded-xl p-4 mb-6 ${syncBinId ? 'bg-green-900/30 border border-green-700/50' : 'bg-slate-900'}`}>
                 <div className="flex items-center gap-3">
-                  <span className="text-2xl">{syncCode ? '☁️' : '📴'}</span>
+                  <span className="text-2xl">{syncBinId ? '☁️' : '📴'}</span>
                   <div className="flex-1">
-                    <p className="font-medium">{syncCode ? 'Family Sync Active' : 'Not Connected'}</p>
-                    {syncCode ? (
-                      <p className="text-green-400 text-xl font-bold tracking-widest">{syncCode}</p>
+                    <p className="font-medium">{syncBinId ? 'Family Sync Active' : 'Not Connected'}</p>
+                    {syncBinId ? (
+                      <p className="text-green-400 text-xl font-bold tracking-widest">{syncBinId}</p>
                     ) : (
                       <p className="text-slate-500 text-sm">Create or join below</p>
                     )}
@@ -2081,7 +2080,7 @@ Based on the vendor name and items, respond with ONLY valid JSON:
                 </div>
               </div>
 
-              {syncCode ? (
+              {syncBinId ? (
                 <>
                   {/* Connected State */}
                   <button onClick={copyFamilyCode} className="w-full py-3 bg-cyan-600 rounded-xl font-medium mb-3">
