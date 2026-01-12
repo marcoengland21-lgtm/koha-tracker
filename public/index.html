@@ -874,139 +874,166 @@ Respond with ONLY valid JSON:
         }));
       };
 
-      // Receipt scanning with Claude API + AI category validation
+      // Receipt scanning with HuggingFace OCR + Mistral parsing
       const scanReceipt = async (imageData) => {
         setScanning(true);
+        setScanResult(null);
+        
         try {
-          // Step 1: Claude reads the receipt and extracts structured data
-          const response = await fetch('https://api.anthropic.com/v1/messages', {
+          // Step 1: Use DONUT model (trained on receipts) to extract text
+          // This model is specifically fine-tuned for receipt understanding
+          const ocrResponse = await fetch('https://api-inference.huggingface.co/models/naver-clova-ix/donut-base-finetuned-cord-v2', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Authorization': `Bearer ${HF_TOKEN}`,
+              'Content-Type': 'application/json'
+            },
             body: JSON.stringify({
-              model: 'claude-sonnet-4-20250514',
-              max_tokens: 1500,
-              messages: [{
-                role: 'user',
-                content: [
-                  { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageData } },
-                  { type: 'text', text: `Analyze this receipt image carefully. Extract ALL visible information.
-
-Respond ONLY with valid JSON:
-{
-  "total": <number - the final total/amount paid, look for "TOTAL", "EFTPOS", "PAID" etc>,
-  "date": "<YYYY-MM-DD format if visible, otherwise null>",
-  "time": "<HH:MM format if visible, otherwise null>",
-  "vendor": "<exact store/business name as shown>",
-  "address": "<store address if visible, otherwise null>",
-  "items": [
-    {"name": "<item name>", "qty": <quantity or 1>, "price": <price as number>}
-  ],
-  "subtotal": <subtotal if shown, otherwise null>,
-  "gst": <GST amount if shown, otherwise null>,
-  "paymentMethod": "<EFTPOS/CASH/VISA/etc if shown>",
-  "receiptNumber": "<receipt/transaction number if visible>",
-  "rawText": "<any other relevant text>"
-}
-
-Be precise with amounts. Include ALL line items you can read.` }
-                ]
-              }]
+              inputs: imageData,
+              options: { wait_for_model: true }
             })
           });
-          const data = await response.json();
-          const text = data.content?.[0]?.text || '';
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
+
+          let extractedText = '';
+          let parsedData = null;
           
-          if (jsonMatch) {
-            const extracted = JSON.parse(jsonMatch[0]);
+          if (ocrResponse.ok) {
+            const ocrData = await ocrResponse.json();
+            console.log('OCR result:', ocrData);
             
-            // Store original image and extracted data
-            extracted.originalImage = imageData;
-            extracted.scannedAt = new Date().toISOString();
-            
-            // Step 2: Use AI to determine best category based on extracted info
-            const categoryPrompt = `<s>[INST] You are categorizing an expense for a funeral/tangihanga fund tracker in New Zealand.
-
-Receipt info:
-- Vendor: "${extracted.vendor || 'Unknown'}"
-- Items: "${Array.isArray(extracted.items) ? extracted.items.map(i => i.name).join(', ') : 'Unknown'}"
-- Amount: $${extracted.total || 0}
-
-Available categories (pick the BEST match):
-- kai (supermarkets: Countdown, Pak n Save, New World, Four Square, Fresh Choice - for groceries)
-- catering (restaurants, takeaway: KFC, McDonalds, Subway, pizza, sushi, cafes)
-- drinks (beverages: Super Liquor, Liquorland, bottle stores, drink suppliers)
-- petrol (fuel stations: Z, BP, Mobil, Gull, Caltex, NPD, Waitomo)
-- flowers (florists, garden centers for funeral flowers)
-- clothing (clothing stores: Kmart, Farmers, Hallensteins, Postie)
-- printing (print shops: Warehouse Stationery, OfficeMax - for service sheets)
-- funeral_home (funeral directors, mortuaries)
-- venue (venue hire, halls, marae)
-- church (church donations, minister fees)
-- accommodation (hotels, motels, Airbnb)
-- flights (airlines, Air NZ, Jetstar)
-- power (power companies: Mercury, Genesis, Contact)
-- rubbish (landfill, transfer station, skip bins, waste)
-- misc (ONLY if nothing else fits)
-
-Based on the vendor name and items, respond with ONLY valid JSON:
-{"category": "<category_id>", "confidence": <0-100>, "reason": "<brief explanation>"}
-[/INST]</s>`;
-
-            try {
-              const aiResponse = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${HF_TOKEN}`,
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  inputs: categoryPrompt,
-                  parameters: { max_new_tokens: 100, temperature: 0.1 }
-                })
-              });
-
-              if (aiResponse.ok) {
-                const aiData = await aiResponse.json();
-                const aiText = aiData[0]?.generated_text || '';
-                const aiJsonMatch = aiText.match(/\{[^}]+\}/);
-                
-                if (aiJsonMatch) {
-                  const categoryResult = JSON.parse(aiJsonMatch[0]);
-                  extracted.category = categoryResult.category;
-                  extracted.categoryConfidence = categoryResult.confidence;
-                  extracted.categoryReason = categoryResult.reason;
-                }
-              }
-            } catch (aiErr) {
-              console.error('AI category detection failed, using fallback:', aiErr);
-              // Fallback to basic keyword matching
-              const vendor = (extracted.vendor || '').toLowerCase();
-              const itemsText = Array.isArray(extracted.items) ? extracted.items.map(i => i.name).join(' ').toLowerCase() : '';
-              const combined = vendor + ' ' + itemsText;
+            // DONUT returns structured output - try to parse it
+            if (ocrData && typeof ocrData === 'object') {
+              // The model returns JSON-like structure
+              extractedText = JSON.stringify(ocrData);
               
-              if (/countdown|pak n save|new world|supermarket|fresh choice|four square/.test(combined)) extracted.category = 'kai';
-              else if (/z station|bp|mobil|gull|caltex|fuel|petrol/.test(combined)) extracted.category = 'petrol';
-              else if (/kfc|mcdonald|subway|pizza|cafe|restaurant|takeaway/.test(combined)) extracted.category = 'catering';
-              else if (/liquor|wine|beer|bottle/.test(combined)) extracted.category = 'drinks';
-              else if (/florist|flower|bloom/.test(combined)) extracted.category = 'flowers';
-              else if (/warehouse stationery|office|print/.test(combined)) extracted.category = 'printing';
-              else if (/kmart|farmers|clothing|dress/.test(combined)) extracted.category = 'clothing';
-              else if (/landfill|transfer station|tip|dump|rubbish/.test(combined)) extracted.category = 'rubbish';
-              else extracted.category = 'misc';
-            }
-
-            if (!extracted.error) {
-              setScanResult(extracted);
-              setScanning(false);
-              return extracted;
+              // Try to extract from DONUT's format
+              if (ocrData.predictions || ocrData[0]?.generated_text) {
+                const pred = ocrData.predictions || ocrData[0]?.generated_text || '';
+                extractedText = typeof pred === 'string' ? pred : JSON.stringify(pred);
+              }
+            } else if (typeof ocrData === 'string') {
+              extractedText = ocrData;
             }
           }
-          throw new Error('Could not parse');
+          
+          // If DONUT failed, try general OCR model as backup
+          if (!extractedText || extractedText.length < 10) {
+            console.log('DONUT failed, trying TrOCR...');
+            const trOcrResponse = await fetch('https://api-inference.huggingface.co/models/microsoft/trocr-base-printed', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${HF_TOKEN}`,
+              },
+              body: Uint8Array.from(atob(imageData), c => c.charCodeAt(0))
+            });
+            
+            if (trOcrResponse.ok) {
+              const trOcrData = await trOcrResponse.json();
+              extractedText = trOcrData[0]?.generated_text || trOcrData?.generated_text || '';
+            }
+          }
+
+          console.log('Extracted text:', extractedText);
+
+          // Step 2: Use Mistral to parse the extracted text into structured data
+          const parsePrompt = `<s>[INST] You are parsing receipt text extracted via OCR. The text may have errors or formatting issues.
+
+OCR Text from receipt:
+"""
+${extractedText}
+"""
+
+Extract the information and respond with ONLY valid JSON (no other text):
+{
+  "total": <number - final total paid, look for largest amount or "TOTAL"/"EFTPOS"/"PAID", use 0 if not found>,
+  "vendor": "<store name, best guess from text>",
+  "date": "<YYYY-MM-DD if found, otherwise null>",
+  "time": "<HH:MM if found, otherwise null>",
+  "items": [{"name": "<item>", "price": <number>}],
+  "category": "<one of: kai, catering, drinks, petrol, flowers, clothing, printing, funeral_home, venue, church, accommodation, flights, power, rubbish, misc>",
+  "rawText": "<cleaned up version of the receipt text>"
+}
+
+Category guide:
+- kai = supermarkets (Countdown, Pak n Save, New World, Fresh Choice)
+- catering = restaurants/takeaway (KFC, McDonalds, cafes)
+- drinks = liquor stores (Super Liquor, Liquorland)
+- petrol = fuel (Z, BP, Mobil, Gull, Caltex)
+- flowers = florists
+- clothing = clothes (Kmart, Farmers)
+- printing = print shops (Warehouse Stationery)
+- misc = if nothing else fits
+
+Respond with ONLY the JSON object.
+[/INST]</s>`;
+
+          const parseResponse = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${HF_TOKEN}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              inputs: parsePrompt,
+              parameters: { max_new_tokens: 500, temperature: 0.1 }
+            })
+          });
+
+          if (parseResponse.ok) {
+            const parseData = await parseResponse.json();
+            const parseText = parseData[0]?.generated_text || '';
+            console.log('Parse result:', parseText);
+            
+            // Extract JSON from response
+            const jsonMatch = parseText.match(/\{[\s\S]*?\}(?=\s*$|\s*\n|$)/);
+            if (jsonMatch) {
+              try {
+                parsedData = JSON.parse(jsonMatch[0]);
+              } catch (e) {
+                // Try to fix common JSON issues
+                let fixed = jsonMatch[0]
+                  .replace(/,\s*}/g, '}')
+                  .replace(/'/g, '"')
+                  .replace(/(\w+):/g, '"$1":');
+                try {
+                  parsedData = JSON.parse(fixed);
+                } catch (e2) {
+                  console.error('JSON parse failed:', e2);
+                }
+              }
+            }
+          }
+
+          // Build result object
+          const result = {
+            total: parsedData?.total || 0,
+            vendor: parsedData?.vendor || 'Unknown',
+            date: parsedData?.date || null,
+            time: parsedData?.time || null,
+            items: parsedData?.items || [],
+            category: parsedData?.category || 'misc',
+            rawText: parsedData?.rawText || extractedText,
+            originalImage: imageData,
+            scannedAt: new Date().toISOString()
+          };
+
+          setScanResult(result);
+          setScanning(false);
+          return result;
+          
         } catch (e) {
           console.error('Scan failed:', e);
           setScanning(false);
-          return null;
+          
+          // Return a basic result so user can still enter manually
+          return {
+            total: 0,
+            vendor: '',
+            category: 'misc',
+            originalImage: imageData,
+            scannedAt: new Date().toISOString(),
+            error: 'Scan failed - please enter details manually'
+          };
         }
       };
 
@@ -2442,10 +2469,38 @@ Based on the vendor name and items, respond with ONLY valid JSON:
         const [pendingReceipt, setPendingReceipt] = useState(null);
         const [showReceipt, setShowReceipt] = useState(false);
         const [showOriginalImage, setShowOriginalImage] = useState(false);
+        const [photoTaken, setPhotoTaken] = useState(editing ? true : false); // New: track if photo taken
         const fileInputRef = useRef(null);
         
         // Get receipt (from pending scan or existing expense)
         const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
+
+        // Compress image to reduce storage size
+        const compressImage = (base64, maxWidth = 1200, quality = 0.7) => {
+          return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              let width = img.width;
+              let height = img.height;
+              
+              if (width > maxWidth) {
+                height = (height * maxWidth) / width;
+                width = maxWidth;
+              }
+              
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, width, height);
+              
+              // Get compressed base64 without the data URL prefix
+              const compressed = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+              resolve(compressed);
+            };
+            img.src = `data:image/jpeg;base64,${base64}`;
+          });
+        };
 
         // Receipt Viewer Component
         const ReceiptViewer = ({ receipt, onClose }) => {
@@ -2584,14 +2639,16 @@ Based on the vendor name and items, respond with ONLY valid JSON:
               time: scanResult.time,
               paymentMethod: scanResult.paymentMethod,
               receiptNumber: scanResult.receiptNumber,
-              scannedAt: scanResult.scannedAt
+              scannedAt: scanResult.scannedAt,
+              rawText: scanResult.rawText
             });
             
+            // Mark photo as taken
+            setPhotoTaken(true);
+            
             // Show scan info
-            if (scanResult.categoryConfidence) {
+            if (scanResult.vendor) {
               setLastScanInfo({
-                confidence: scanResult.categoryConfidence,
-                reason: scanResult.categoryReason,
                 vendor: scanResult.vendor,
                 itemCount: Array.isArray(scanResult.items) ? scanResult.items.length : 0
               });
@@ -2609,9 +2666,28 @@ Based on the vendor name and items, respond with ONLY valid JSON:
           const reader = new FileReader();
           reader.onload = async () => {
             const base64 = reader.result.split(',')[1];
-            const result = await scanReceipt(base64);
-            if (!result) {
-              alert('Could not read receipt. Try a clearer photo.');
+            
+            // Compress the image before processing
+            const compressed = await compressImage(base64, 1200, 0.7);
+            console.log(`Image compressed: ${Math.round(base64.length / 1024)}KB -> ${Math.round(compressed.length / 1024)}KB`);
+            
+            const result = await scanReceipt(compressed);
+            if (result) {
+              // Make sure the receipt has the compressed image
+              if (result.originalImage) {
+                result.originalImage = compressed;
+              }
+              setPhotoTaken(true);
+            } else {
+              // Even if scan fails, keep the photo and let user enter manually
+              setPendingReceipt({
+                originalImage: compressed,
+                scannedAt: new Date().toISOString(),
+                vendor: '',
+                total: 0
+              });
+              setPhotoTaken(true);
+              alert('Could not read receipt automatically. Please enter the details manually.');
             }
             setScanningLocal(false);
           };
@@ -2651,17 +2727,49 @@ Based on the vendor name and items, respond with ONLY valid JSON:
           <div className="min-h-screen bg-slate-950 text-white pb-24">
             <div className="px-5 pt-8">
               <button onClick={() => { setScreen(editing ? 'expenses' : 'home'); setEditingItem(null); }} className="text-slate-500 text-sm mb-4">← Back</button>
-              <div className="flex justify-between items-center mb-6">
-                <h1 className="text-2xl font-bold">{editing ? "Edit" : "Add Expense"}</h1>
-                {!editing && (
-                  <>
-                    <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleScan} className="hidden" />
-                    <button onClick={() => fileInputRef.current?.click()} disabled={scanningLocal || scanning} className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-xl text-sm font-medium disabled:opacity-50">
-                      {scanningLocal || scanning ? <><span className="spin">🔄</span> Scanning...</> : <>📷 Scan</>}
-                    </button>
-                  </>
-                )}
-              </div>
+              
+              {/* Show photo prompt for new expenses without photo */}
+              {!editing && !photoTaken ? (
+                <div className="flex flex-col items-center justify-center min-h-[60vh]">
+                  <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleScan} className="hidden" />
+                  
+                  <div className="text-6xl mb-6">📷</div>
+                  <h1 className="text-2xl font-bold mb-2">Take Receipt Photo</h1>
+                  <p className="text-slate-400 text-center mb-8 px-4">
+                    Photo required for all expenses.<br/>
+                    We'll try to read the details automatically.
+                  </p>
+                  
+                  <button 
+                    onClick={() => fileInputRef.current?.click()} 
+                    disabled={scanningLocal || scanning} 
+                    className="px-8 py-4 bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl text-lg font-bold disabled:opacity-50 flex items-center gap-3"
+                  >
+                    {scanningLocal || scanning ? (
+                      <><span className="spin">🔄</span> Reading receipt...</>
+                    ) : (
+                      <>📸 Take Photo</>
+                    )}
+                  </button>
+                  
+                  {(scanningLocal || scanning) && (
+                    <p className="text-slate-500 text-sm mt-4 animate-pulse">AI is reading your receipt...</p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {/* Normal form after photo taken or when editing */}
+                  <div className="flex justify-between items-center mb-6">
+                    <h1 className="text-2xl font-bold">{editing ? "Edit" : "Add Expense"}</h1>
+                    {!editing && (
+                      <>
+                        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleScan} className="hidden" />
+                        <button onClick={() => fileInputRef.current?.click()} disabled={scanningLocal || scanning} className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-xl text-sm font-medium disabled:opacity-50">
+                          {scanningLocal || scanning ? <><span className="spin">🔄</span> Scanning...</> : <>📷 Rescan</>}
+                        </button>
+                      </>
+                    )}
+                  </div>
 
               {/* AI Scan Result Info */}
               {lastScanInfo && (
@@ -2669,10 +2777,10 @@ Based on the vendor name and items, respond with ONLY valid JSON:
                   <div className="flex items-center gap-2">
                     <span className="text-green-400">✓</span>
                     <span className="text-green-200 text-sm">
-                      AI detected: {lastScanInfo.vendor} ({lastScanInfo.confidence}% confident)
+                      Receipt scanned: {lastScanInfo.vendor || 'Receipt captured'}
+                      {lastScanInfo.itemCount > 0 && ` (${lastScanInfo.itemCount} items)`}
                     </span>
                   </div>
-                  <p className="text-green-400/70 text-xs mt-1">{lastScanInfo.reason}</p>
                 </div>
               )}
 
@@ -2769,6 +2877,8 @@ Based on the vendor name and items, respond with ONLY valid JSON:
                 <button onClick={handleDelete} className={`w-full py-3 mt-3 rounded-xl font-medium ${confirmDelete ? 'bg-red-600 text-white' : 'bg-slate-900 text-red-400'}`}>
                   {confirmDelete ? 'Tap again to confirm' : 'Delete'}
                 </button>
+              )}
+                </>
               )}
             </div>
             <Nav />
